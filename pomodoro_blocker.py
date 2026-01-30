@@ -49,45 +49,28 @@ class HostsFileManager:
             raise HostsFileError(
                 "Hosts file is not writable. Run with elevated privileges (sudo/administrator)."
             )
-        backup_dir = self._backup_path.parent
-        if not os.access(backup_dir, os.W_OK):
-            raise HostsFileError(
-                "Backup location is not writable. Run with elevated privileges (sudo/administrator)."
-            )
 
     def read_hosts(self) -> str:
-        try:
-            return self._hosts_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise HostsFileError(f"Failed to read hosts file: {exc}") from exc
+        return self._hosts_path.read_text(encoding="utf-8")
 
     def write_hosts(self, content: str) -> None:
         if self._dry_run:
             return
-        try:
-            self._hosts_path.write_text(content, encoding="utf-8")
-        except OSError as exc:
-            raise HostsFileError(f"Failed to write hosts file: {exc}") from exc
+        self._hosts_path.write_text(content, encoding="utf-8")
 
     def backup(self) -> None:
         if self._dry_run:
             return
         if not self._backup_path.exists():
-            try:
-                self._backup_path.write_text(self.read_hosts(), encoding="utf-8")
-            except OSError as exc:
-                raise HostsFileError(f"Failed to write backup hosts file: {exc}") from exc
+            self._backup_path.write_text(self.read_hosts(), encoding="utf-8")
 
     def restore(self) -> None:
         if self._dry_run:
             return
         if self._backup_path.exists():
-            try:
-                original = self._backup_path.read_text(encoding="utf-8")
-                self._hosts_path.write_text(original, encoding="utf-8")
-                self._backup_path.unlink()
-            except OSError as exc:
-                raise HostsFileError(f"Failed to restore hosts file backup: {exc}") from exc
+            original = self._backup_path.read_text(encoding="utf-8")
+            self._hosts_path.write_text(original, encoding="utf-8")
+            self._backup_path.unlink()
 
     def apply_block(self, domains: Iterable[str]) -> None:
         if self._dry_run:
