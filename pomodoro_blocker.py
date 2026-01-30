@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import json
 import os
 import platform
 import sys
@@ -15,12 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, scrolledtext
 from typing import Iterable, List, Optional
-import subprocess
 
 BLOCK_MARKER_START = "# POMODORO_BLOCK_START"
 BLOCK_MARKER_END = "# POMODORO_BLOCK_END"
 REDIRECT_IP = "127.0.0.1"
-BLOCK_IPS = ("0.0.0.0", "127.0.0.1", "::1")
 
 
 @dataclass(frozen=True)
@@ -52,52 +49,35 @@ class HostsFileManager:
             raise HostsFileError(
                 "Hosts file is not writable. Run with elevated privileges (sudo/administrator)."
             )
-        backup_dir = self._backup_path.parent
-        if not os.access(backup_dir, os.W_OK):
-            raise HostsFileError(
-                "Backup location is not writable. Run with elevated privileges (sudo/administrator)."
-            )
 
     def read_hosts(self) -> str:
-        try:
-            return self._hosts_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise HostsFileError(f"Failed to read hosts file: {exc}") from exc
+        return self._hosts_path.read_text(encoding="utf-8")
 
     def write_hosts(self, content: str) -> None:
         if self._dry_run:
             return
-        try:
-            self._hosts_path.write_text(content, encoding="utf-8")
-        except OSError as exc:
-            raise HostsFileError(f"Failed to write hosts file: {exc}") from exc
+        self._hosts_path.write_text(content, encoding="utf-8")
 
     def backup(self) -> None:
         if self._dry_run:
             return
         if not self._backup_path.exists():
-            try:
-                self._backup_path.write_text(self.read_hosts(), encoding="utf-8")
-            except OSError as exc:
-                raise HostsFileError(f"Failed to write backup hosts file: {exc}") from exc
+            self._backup_path.write_text(self.read_hosts(), encoding="utf-8")
 
     def restore(self) -> None:
         if self._dry_run:
             return
         if self._backup_path.exists():
-            try:
-                original = self._backup_path.read_text(encoding="utf-8")
-                self._hosts_path.write_text(original, encoding="utf-8")
-                self._backup_path.unlink()
-            except OSError as exc:
-                raise HostsFileError(f"Failed to restore hosts file backup: {exc}") from exc
+            original = self._backup_path.read_text(encoding="utf-8")
+            self._hosts_path.write_text(original, encoding="utf-8")
+            self._backup_path.unlink()
 
     def apply_block(self, domains: Iterable[str]) -> None:
         if self._dry_run:
             return
         hosts_content = self.read_hosts()
         cleaned = self._remove_existing_block(hosts_content)
-        block_lines = [f"{ip} {domain}" for ip in BLOCK_IPS for domain in domains]
+        block_lines = [f"{REDIRECT_IP} {domain}" for domain in domains]
         block_section = (
             f"{BLOCK_MARKER_START}\n" + "\n".join(block_lines) + f"\n{BLOCK_MARKER_END}\n"
         )
@@ -137,32 +117,6 @@ def detect_hosts_path() -> Path:
     if "darwin" in system:
         return Path("/etc/hosts")
     return Path("/etc/hosts")
-
-def get_settings_path() -> Path:
-    system = platform.system().lower()
-    if "windows" in system:
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-        return base / "PomodoroUrlBlocker" / "settings.json"
-    if "darwin" in system:
-        return Path.home() / "Library" / "Application Support" / "PomodoroUrlBlocker" / "settings.json"
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "pomodoro-url-blocker" / "settings.json"
-
-def load_settings() -> dict:
-    settings_path = get_settings_path()
-    if not settings_path.exists():
-        return {}
-    try:
-        return json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-def save_settings(settings: dict) -> None:
-    settings_path = get_settings_path()
-    try:
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        return
 
 
 def parse_cli_args(argv: List[str]) -> PomodoroConfig:
@@ -245,8 +199,7 @@ def run_cli(config: PomodoroConfig) -> None:
         + (" (dry-run)" if config.dry_run else "")
     )
 
-    with manager.blocking(expand_domains(config.domains)):
-        flush_dns_cache()
+    with manager.blocking(config.domains):
         for cycle in range(1, config.cycles + 1):
             log(f"Cycle {cycle}/{config.cycles} focus started.")
             run_timer(config.focus_minutes, label="Focus")
@@ -269,35 +222,6 @@ def parse_domains_text(raw_text: str) -> List[str]:
                 domains.append(item)
     return sorted(set(domains))
 
-def expand_domains(domains: Iterable[str]) -> List[str]:
-    expanded: List[str] = []
-    for domain in domains:
-        cleaned = domain.strip()
-        if not cleaned:
-            continue
-        expanded.append(cleaned)
-        if "." in cleaned and not cleaned.startswith("www.") and cleaned.count(".") == 1:
-            expanded.append(f"www.{cleaned}")
-    return sorted(set(expanded))
-
-
-def flush_dns_cache() -> None:
-    system = platform.system().lower()
-    if "windows" in system:
-        _run_flush_command(["ipconfig", "/flushdns"])
-    elif "darwin" in system:
-        _run_flush_command(["dscacheutil", "-flushcache"])
-        _run_flush_command(["killall", "-HUP", "mDNSResponder"])
-    else:
-        _run_flush_command(["systemd-resolve", "--flush-caches"])
-        _run_flush_command(["resolvectl", "flush-caches"])
-
-
-def _run_flush_command(command: List[str]) -> None:
-    try:
-        subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        return
 
 def format_time(seconds: int) -> str:
     mins, secs = divmod(max(0, seconds), 60)
@@ -325,10 +249,9 @@ class PomodoroApp:
         self._remaining_seconds = 0
         self._running = False
 
-        saved = load_settings()
-        self._focus_var = tk.StringVar(value=str(saved.get("focus_minutes", 25)))
-        self._break_var = tk.StringVar(value=str(saved.get("break_minutes", 5)))
-        self._cycles_var = tk.StringVar(value=str(saved.get("cycles", 4)))
+        self._focus_var = tk.StringVar(value="25")
+        self._break_var = tk.StringVar(value="5")
+        self._cycles_var = tk.StringVar(value="4")
 
         self._status_var = tk.StringVar(value="Ready")
         self._timer_var = tk.StringVar(value="00:00")
@@ -357,9 +280,6 @@ class PomodoroApp:
         tk.Label(domains_frame, text="Blocked domains (one per line or comma-separated)").pack(anchor="w")
         self._domains_text = scrolledtext.ScrolledText(domains_frame, height=6, wrap=tk.WORD)
         self._domains_text.pack(fill=tk.BOTH, expand=True)
-        saved_domains = saved.get("domains", [])
-        if isinstance(saved_domains, list) and saved_domains:
-            self._domains_text.insert(tk.END, "\n".join(saved_domains))
 
         status_frame = tk.Frame(self._root, padx=10, pady=10)
         status_frame.pack(fill=tk.X)
@@ -413,24 +333,14 @@ class PomodoroApp:
             messagebox.showerror("Hosts file error", str(exc))
             return
 
-        expanded_domains = expand_domains(domains)
         self._plan = build_cycle_plan(focus, break_minutes, cycles)
         self._current_index = 0
         self._remaining_seconds = self._plan[0][1]
         self._manager = manager
-        save_settings(
-            {
-                "focus_minutes": focus,
-                "break_minutes": break_minutes,
-                "cycles": cycles,
-                "domains": domains,
-            }
-        )
 
         try:
             manager.backup()
-            manager.apply_block(expanded_domains)
-            flush_dns_cache()
+            manager.apply_block(domains)
         except HostsFileError as exc:
             messagebox.showerror("Hosts file error", str(exc))
             return
