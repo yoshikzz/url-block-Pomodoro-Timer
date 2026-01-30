@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, scrolledtext
 from typing import Iterable, List, Optional
-import subprocess
 
 BLOCK_MARKER_START = "# POMODORO_BLOCK_START"
 BLOCK_MARKER_END = "# POMODORO_BLOCK_END"
@@ -50,45 +49,28 @@ class HostsFileManager:
             raise HostsFileError(
                 "Hosts file is not writable. Run with elevated privileges (sudo/administrator)."
             )
-        backup_dir = self._backup_path.parent
-        if not os.access(backup_dir, os.W_OK):
-            raise HostsFileError(
-                "Backup location is not writable. Run with elevated privileges (sudo/administrator)."
-            )
 
     def read_hosts(self) -> str:
-        try:
-            return self._hosts_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise HostsFileError(f"Failed to read hosts file: {exc}") from exc
+        return self._hosts_path.read_text(encoding="utf-8")
 
     def write_hosts(self, content: str) -> None:
         if self._dry_run:
             return
-        try:
-            self._hosts_path.write_text(content, encoding="utf-8")
-        except OSError as exc:
-            raise HostsFileError(f"Failed to write hosts file: {exc}") from exc
+        self._hosts_path.write_text(content, encoding="utf-8")
 
     def backup(self) -> None:
         if self._dry_run:
             return
         if not self._backup_path.exists():
-            try:
-                self._backup_path.write_text(self.read_hosts(), encoding="utf-8")
-            except OSError as exc:
-                raise HostsFileError(f"Failed to write backup hosts file: {exc}") from exc
+            self._backup_path.write_text(self.read_hosts(), encoding="utf-8")
 
     def restore(self) -> None:
         if self._dry_run:
             return
         if self._backup_path.exists():
-            try:
-                original = self._backup_path.read_text(encoding="utf-8")
-                self._hosts_path.write_text(original, encoding="utf-8")
-                self._backup_path.unlink()
-            except OSError as exc:
-                raise HostsFileError(f"Failed to restore hosts file backup: {exc}") from exc
+            original = self._backup_path.read_text(encoding="utf-8")
+            self._hosts_path.write_text(original, encoding="utf-8")
+            self._backup_path.unlink()
 
     def apply_block(self, domains: Iterable[str]) -> None:
         if self._dry_run:
@@ -217,8 +199,7 @@ def run_cli(config: PomodoroConfig) -> None:
         + (" (dry-run)" if config.dry_run else "")
     )
 
-    with manager.blocking(expand_domains(config.domains)):
-        flush_dns_cache()
+    with manager.blocking(config.domains):
         for cycle in range(1, config.cycles + 1):
             log(f"Cycle {cycle}/{config.cycles} focus started.")
             run_timer(config.focus_minutes, label="Focus")
@@ -241,35 +222,6 @@ def parse_domains_text(raw_text: str) -> List[str]:
                 domains.append(item)
     return sorted(set(domains))
 
-def expand_domains(domains: Iterable[str]) -> List[str]:
-    expanded: List[str] = []
-    for domain in domains:
-        cleaned = domain.strip()
-        if not cleaned:
-            continue
-        expanded.append(cleaned)
-        if "." in cleaned and not cleaned.startswith("www.") and cleaned.count(".") == 1:
-            expanded.append(f"www.{cleaned}")
-    return sorted(set(expanded))
-
-
-def flush_dns_cache() -> None:
-    system = platform.system().lower()
-    if "windows" in system:
-        _run_flush_command(["ipconfig", "/flushdns"])
-    elif "darwin" in system:
-        _run_flush_command(["dscacheutil", "-flushcache"])
-        _run_flush_command(["killall", "-HUP", "mDNSResponder"])
-    else:
-        _run_flush_command(["systemd-resolve", "--flush-caches"])
-        _run_flush_command(["resolvectl", "flush-caches"])
-
-
-def _run_flush_command(command: List[str]) -> None:
-    try:
-        subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        return
 
 def format_time(seconds: int) -> str:
     mins, secs = divmod(max(0, seconds), 60)
@@ -381,7 +333,6 @@ class PomodoroApp:
             messagebox.showerror("Hosts file error", str(exc))
             return
 
-        expanded_domains = expand_domains(domains)
         self._plan = build_cycle_plan(focus, break_minutes, cycles)
         self._current_index = 0
         self._remaining_seconds = self._plan[0][1]
@@ -389,8 +340,7 @@ class PomodoroApp:
 
         try:
             manager.backup()
-            manager.apply_block(expanded_domains)
-            flush_dns_cache()
+            manager.apply_block(domains)
         except HostsFileError as exc:
             messagebox.showerror("Hosts file error", str(exc))
             return
