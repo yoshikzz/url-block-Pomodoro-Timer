@@ -5,24 +5,19 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import json
 import os
 import platform
-import socket
 import sys
 import time
 import tkinter as tk
-import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, scrolledtext
-from typing import Dict, Iterable, List, Optional, Set
-import subprocess
+from typing import Iterable, List, Optional
 
 BLOCK_MARKER_START = "# POMODORO_BLOCK_START"
 BLOCK_MARKER_END = "# POMODORO_BLOCK_END"
 REDIRECT_IP = "127.0.0.1"
-BLOCK_IPS = ("0.0.0.0", "127.0.0.1", "::1")
 
 
 @dataclass(frozen=True)
@@ -33,14 +28,9 @@ class PomodoroConfig:
     domains: List[str]
     dry_run: bool
     hosts_path: Path
-    use_firewall: bool
 
 
 class HostsFileError(RuntimeError):
-    pass
-
-
-class FirewallError(RuntimeError):
     pass
 
 
@@ -59,52 +49,35 @@ class HostsFileManager:
             raise HostsFileError(
                 "Hosts file is not writable. Run with elevated privileges (sudo/administrator)."
             )
-        backup_dir = self._backup_path.parent
-        if not os.access(backup_dir, os.W_OK):
-            raise HostsFileError(
-                "Backup location is not writable. Run with elevated privileges (sudo/administrator)."
-            )
 
     def read_hosts(self) -> str:
-        try:
-            return self._hosts_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise HostsFileError(f"Failed to read hosts file: {exc}") from exc
+        return self._hosts_path.read_text(encoding="utf-8")
 
     def write_hosts(self, content: str) -> None:
         if self._dry_run:
             return
-        try:
-            self._hosts_path.write_text(content, encoding="utf-8")
-        except OSError as exc:
-            raise HostsFileError(f"Failed to write hosts file: {exc}") from exc
+        self._hosts_path.write_text(content, encoding="utf-8")
 
     def backup(self) -> None:
         if self._dry_run:
             return
         if not self._backup_path.exists():
-            try:
-                self._backup_path.write_text(self.read_hosts(), encoding="utf-8")
-            except OSError as exc:
-                raise HostsFileError(f"Failed to write backup hosts file: {exc}") from exc
+            self._backup_path.write_text(self.read_hosts(), encoding="utf-8")
 
     def restore(self) -> None:
         if self._dry_run:
             return
         if self._backup_path.exists():
-            try:
-                original = self._backup_path.read_text(encoding="utf-8")
-                self._hosts_path.write_text(original, encoding="utf-8")
-                self._backup_path.unlink()
-            except OSError as exc:
-                raise HostsFileError(f"Failed to restore hosts file backup: {exc}") from exc
+            original = self._backup_path.read_text(encoding="utf-8")
+            self._hosts_path.write_text(original, encoding="utf-8")
+            self._backup_path.unlink()
 
     def apply_block(self, domains: Iterable[str]) -> None:
         if self._dry_run:
             return
         hosts_content = self.read_hosts()
         cleaned = self._remove_existing_block(hosts_content)
-        block_lines = [f"{ip} {domain}" for ip in BLOCK_IPS for domain in domains]
+        block_lines = [f"{REDIRECT_IP} {domain}" for domain in domains]
         block_section = (
             f"{BLOCK_MARKER_START}\n" + "\n".join(block_lines) + f"\n{BLOCK_MARKER_END}\n"
         )
@@ -137,61 +110,6 @@ class HostsFileManager:
             self.restore()
 
 
-class FirewallManager:
-    def __init__(self, dry_run: bool = False) -> None:
-        self._dry_run = dry_run
-        self._rule_names: List[str] = []
-
-    def ensure_supported(self) -> None:
-        if platform.system().lower() != "windows":
-            raise FirewallError("Firewall blocking is only supported on Windows.")
-
-    def apply_block(self, domains: Iterable[str]) -> None:
-        self.ensure_supported()
-        if self._dry_run:
-            return
-        ip_map = resolve_domains(domains)
-        if not ip_map:
-            raise FirewallError("Failed to resolve any IPs for the provided domains.")
-        try:
-            for domain, ips in ip_map.items():
-                rule_name = f"PomodoroUrlBlocker:{domain}"
-                remote_ips = ",".join(sorted(ips))
-                command = [
-                    "netsh",
-                    "advfirewall",
-                    "firewall",
-                    "add",
-                    "rule",
-                    f"name={rule_name}",
-                    "dir=out",
-                    "action=block",
-                    f"remoteip={remote_ips}",
-                    "profile=any",
-                ]
-                result = subprocess.run(
-                    command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-                if result.returncode != 0:
-                    raise FirewallError("Failed to add Windows Firewall rule.")
-                self._rule_names.append(rule_name)
-        except FirewallError:
-            self.clear_block()
-            raise
-
-    def clear_block(self) -> None:
-        if self._dry_run:
-            return
-        for rule_name in self._rule_names:
-            subprocess.run(
-                ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        self._rule_names.clear()
-
-
 def detect_hosts_path() -> Path:
     system = platform.system().lower()
     if "windows" in system:
@@ -199,32 +117,6 @@ def detect_hosts_path() -> Path:
     if "darwin" in system:
         return Path("/etc/hosts")
     return Path("/etc/hosts")
-
-def get_settings_path() -> Path:
-    system = platform.system().lower()
-    if "windows" in system:
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-        return base / "PomodoroUrlBlocker" / "settings.json"
-    if "darwin" in system:
-        return Path.home() / "Library" / "Application Support" / "PomodoroUrlBlocker" / "settings.json"
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "pomodoro-url-blocker" / "settings.json"
-
-def load_settings() -> dict:
-    settings_path = get_settings_path()
-    if not settings_path.exists():
-        return {}
-    try:
-        return json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-def save_settings(settings: dict) -> None:
-    settings_path = get_settings_path()
-    try:
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        return
 
 
 def parse_cli_args(argv: List[str]) -> PomodoroConfig:
@@ -257,24 +149,17 @@ def parse_cli_args(argv: List[str]) -> PomodoroConfig:
         action="store_true",
         help="Do not modify the hosts file; log what would happen.",
     )
-    parser.add_argument(
-        "--use-firewall",
-        action="store_true",
-        help="Use Windows Firewall blocking in addition to hosts (Windows only).",
-    )
 
     args = parser.parse_args(argv)
 
-    domains = [domain for domain in (normalize_domain(item) for item in args.domains) if domain]
+    domains = list(args.domains)
     if args.domains_file:
         file_domains = [
             line.strip()
             for line in args.domains_file.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.strip().startswith("#")
         ]
-        domains.extend(
-            domain for domain in (normalize_domain(item) for item in file_domains) if domain
-        )
+        domains.extend(file_domains)
 
     if not domains:
         parser.error("At least one --domain or --domains-file entry is required.")
@@ -286,7 +171,6 @@ def parse_cli_args(argv: List[str]) -> PomodoroConfig:
         domains=sorted(set(domains)),
         dry_run=args.dry_run,
         hosts_path=args.hosts,
-        use_firewall=args.use_firewall,
     )
 
 
@@ -308,11 +192,6 @@ def run_timer(minutes: int, label: str) -> None:
 
 def run_cli(config: PomodoroConfig) -> None:
     manager = HostsFileManager(config.hosts_path, dry_run=config.dry_run)
-    firewall_manager: Optional[FirewallManager] = None
-    if config.use_firewall:
-        firewall_manager = FirewallManager(dry_run=config.dry_run)
-        firewall_manager.ensure_supported()
-    expanded_domains = expand_domains(config.domains)
 
     log(
         "Pomodoro session starting. Domains blocked: "
@@ -320,39 +199,15 @@ def run_cli(config: PomodoroConfig) -> None:
         + (" (dry-run)" if config.dry_run else "")
     )
 
-    with manager.blocking(expanded_domains):
-        if firewall_manager:
-            firewall_manager.apply_block(expanded_domains)
-        try:
-            flush_dns_cache()
-            for cycle in range(1, config.cycles + 1):
-                log(f"Cycle {cycle}/{config.cycles} focus started.")
-                run_timer(config.focus_minutes, label="Focus")
-                if cycle != config.cycles:
-                    log("Break started.")
-                    run_timer(config.break_minutes, label="Break")
-        finally:
-            if firewall_manager:
-                firewall_manager.clear_block()
+    with manager.blocking(config.domains):
+        for cycle in range(1, config.cycles + 1):
+            log(f"Cycle {cycle}/{config.cycles} focus started.")
+            run_timer(config.focus_minutes, label="Focus")
+            if cycle != config.cycles:
+                log("Break started.")
+                run_timer(config.break_minutes, label="Break")
 
     log("Pomodoro session complete. Domains unblocked.")
-
-
-def normalize_domain(raw: str) -> Optional[str]:
-    value = raw.strip()
-    if not value:
-        return None
-    if "://" in value:
-        parsed = urllib.parse.urlparse(value)
-        host = parsed.hostname
-    else:
-        host = value.split("/")[0]
-    if not host:
-        return None
-    host = host.split(":")[0].strip().strip(".")
-    if not host:
-        return None
-    return host.lower()
 
 
 def parse_domains_text(raw_text: str) -> List[str]:
@@ -364,54 +219,9 @@ def parse_domains_text(raw_text: str) -> List[str]:
         for chunk in cleaned.split(","):
             item = chunk.strip()
             if item:
-                normalized = normalize_domain(item)
-                if normalized:
-                    domains.append(normalized)
+                domains.append(item)
     return sorted(set(domains))
 
-
-def expand_domains(domains: Iterable[str]) -> List[str]:
-    expanded: List[str] = []
-    for domain in domains:
-        cleaned = domain.strip()
-        if not cleaned:
-            continue
-        expanded.append(cleaned)
-        if "." in cleaned and not cleaned.startswith("www.") and cleaned.count(".") == 1:
-            expanded.append(f"www.{cleaned}")
-    return sorted(set(expanded))
-
-
-def resolve_domains(domains: Iterable[str]) -> Dict[str, Set[str]]:
-    resolved: Dict[str, Set[str]] = {}
-    for domain in domains:
-        try:
-            infos = socket.getaddrinfo(domain, None)
-        except socket.gaierror:
-            continue
-        ips = {info[4][0] for info in infos if info[4]}
-        if ips:
-            resolved[domain] = ips
-    return resolved
-
-
-def flush_dns_cache() -> None:
-    system = platform.system().lower()
-    if "windows" in system:
-        _run_flush_command(["ipconfig", "/flushdns"])
-    elif "darwin" in system:
-        _run_flush_command(["dscacheutil", "-flushcache"])
-        _run_flush_command(["killall", "-HUP", "mDNSResponder"])
-    else:
-        _run_flush_command(["systemd-resolve", "--flush-caches"])
-        _run_flush_command(["resolvectl", "flush-caches"])
-
-
-def _run_flush_command(command: List[str]) -> None:
-    try:
-        subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        return
 
 def format_time(seconds: int) -> str:
     mins, secs = divmod(max(0, seconds), 60)
@@ -432,20 +242,16 @@ class PomodoroApp:
         self._root = root
         self._root.title("Pomodoro URL Blocker")
 
-        self._is_windows = platform.system().lower().startswith("windows")
         self._hosts_path = detect_hosts_path()
         self._manager: Optional[HostsFileManager] = None
-        self._firewall_manager: Optional[FirewallManager] = None
         self._plan: List[tuple[str, int]] = []
         self._current_index = 0
         self._remaining_seconds = 0
         self._running = False
 
-        saved = load_settings()
-        self._focus_var = tk.StringVar(value=str(saved.get("focus_minutes", 25)))
-        self._break_var = tk.StringVar(value=str(saved.get("break_minutes", 5)))
-        self._cycles_var = tk.StringVar(value=str(saved.get("cycles", 4)))
-        self._firewall_var = tk.BooleanVar(value=bool(saved.get("use_firewall", False)))
+        self._focus_var = tk.StringVar(value="25")
+        self._break_var = tk.StringVar(value="5")
+        self._cycles_var = tk.StringVar(value="4")
 
         self._status_var = tk.StringVar(value="Ready")
         self._timer_var = tk.StringVar(value="00:00")
@@ -469,23 +275,11 @@ class PomodoroApp:
         self._cycles_entry = tk.Entry(settings_frame, textvariable=self._cycles_var, width=8)
         self._cycles_entry.grid(row=0, column=5, padx=5)
 
-        self._firewall_check = tk.Checkbutton(
-            settings_frame,
-            text="Also block via Windows Firewall (Windows only)",
-            variable=self._firewall_var,
-        )
-        self._firewall_check.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
-        if not self._is_windows:
-            self._firewall_check.configure(state="disabled")
-
         domains_frame = tk.Frame(self._root, padx=10, pady=10)
         domains_frame.pack(fill=tk.BOTH, expand=True)
         tk.Label(domains_frame, text="Blocked domains (one per line or comma-separated)").pack(anchor="w")
         self._domains_text = scrolledtext.ScrolledText(domains_frame, height=6, wrap=tk.WORD)
         self._domains_text.pack(fill=tk.BOTH, expand=True)
-        saved_domains = saved.get("domains", [])
-        if isinstance(saved_domains, list) and saved_domains:
-            self._domains_text.insert(tk.END, "\n".join(saved_domains))
 
         status_frame = tk.Frame(self._root, padx=10, pady=10)
         status_frame.pack(fill=tk.X)
@@ -508,13 +302,7 @@ class PomodoroApp:
 
     def _set_inputs_state(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for widget in (
-            self._focus_entry,
-            self._break_entry,
-            self._cycles_entry,
-            self._domains_text,
-            self._firewall_check,
-        ):
+        for widget in (self._focus_entry, self._break_entry, self._cycles_entry, self._domains_text):
             widget.configure(state=state)
         self._start_button.configure(state=state)
 
@@ -539,49 +327,22 @@ class PomodoroApp:
             return
 
         manager = HostsFileManager(self._hosts_path)
-        firewall_manager: Optional[FirewallManager] = None
-        if self._firewall_var.get():
-            firewall_manager = FirewallManager()
-            try:
-                firewall_manager.ensure_supported()
-            except FirewallError as exc:
-                messagebox.showerror("Firewall error", str(exc))
-                return
         try:
             manager.ensure_writable()
         except HostsFileError as exc:
             messagebox.showerror("Hosts file error", str(exc))
             return
 
-        expanded_domains = expand_domains(domains)
         self._plan = build_cycle_plan(focus, break_minutes, cycles)
         self._current_index = 0
         self._remaining_seconds = self._plan[0][1]
         self._manager = manager
-        self._firewall_manager = firewall_manager
-        save_settings(
-            {
-                "focus_minutes": focus,
-                "break_minutes": break_minutes,
-                "cycles": cycles,
-                "domains": domains,
-                "use_firewall": self._firewall_var.get(),
-            }
-        )
 
         try:
             manager.backup()
-            manager.apply_block(expanded_domains)
-            flush_dns_cache()
-            if firewall_manager:
-                firewall_manager.apply_block(expanded_domains)
+            manager.apply_block(domains)
         except HostsFileError as exc:
             messagebox.showerror("Hosts file error", str(exc))
-            return
-        except FirewallError as exc:
-            manager.clear_block()
-            manager.restore()
-            messagebox.showerror("Firewall error", str(exc))
             return
 
         self._running = True
@@ -621,11 +382,6 @@ class PomodoroApp:
         if not self._running:
             return
         self._running = False
-        if self._firewall_manager:
-            try:
-                self._firewall_manager.clear_block()
-            finally:
-                self._firewall_manager = None
         if self._manager:
             try:
                 self._manager.clear_block()
@@ -656,7 +412,7 @@ def main() -> None:
     try:
         config = parse_cli_args(sys.argv[1:])
         run_cli(config)
-    except (HostsFileError, FirewallError) as exc:
+    except HostsFileError as exc:
         log(str(exc))
         sys.exit(1)
 
