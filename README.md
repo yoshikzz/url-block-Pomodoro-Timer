@@ -15,45 +15,6 @@ python3 pomodoro_blocker.py
 
 - アプリ画面で集中時間、休憩時間、サイクル数、ブロックしたいURLを設定できます。
 - スタート後はセッション終了まで設定を変更できないようにロックします。
-- 次回起動時に **最後に入力した時間とURLが自動で復元**されます。
-
-### 管理者権限での起動（Windows / macOS / Linux）
-
-hosts ファイルを書き換えるため、**管理者権限** が必要です。
-
-**Windows**
-
-1. スタートメニューで「PowerShell」または「コマンドプロンプト」を検索
-2. 右クリック → **「管理者として実行」**
-3. プロジェクトのフォルダへ移動して実行
-
-```powershell
-python pomodoro_blocker.py
-```
-
-**macOS / Linux**
-
-```bash
-sudo python3 pomodoro_blocker.py
-```
-
-## ブロックされない時のチェックポイント
-
-1. **管理者権限で起動できているか**  
-   hosts ファイルの編集は管理者権限が必須です。
-2. **`www.` 付きのドメインも必要か**  
-   `example.com` を入力しても、実際には `www.example.com` にアクセスしている場合があります。  
-   このアプリでは **`example.com` を入力すると `www.example.com` も自動でブロック**します。
-3. **DNS キャッシュ**  
-   hosts を更新しても、OS やブラウザが古い情報を持っていると反映されないことがあります。  
-   アプリは起動時に DNS キャッシュのフラッシュを試みますが、うまくいかない場合は PC 再起動が確実です。
-4. **ブラウザの DNS オーバー HTTPS (DoH)**  
-   一部ブラウザは OS の DNS を使わずに独自の DNS を使うことがあります。  
-   その場合はブラウザ設定で **「セキュア DNS / DoH」** を無効にしてください。
-5. **hosts ファイルが本当に更新されているか**  
-   `# POMODORO_BLOCK_START` 〜 `# POMODORO_BLOCK_END` の間にブロック対象が書き込まれているか確認してください。
-6. **ブラウザの再起動 / シークレットウィンドウ**  
-   既存タブの DNS が固定されている場合があるため、ブラウザを再起動するかシークレットウィンドウで試してください。
 
 ## 使い方 (CLI)
 
@@ -121,37 +82,3 @@ sudo python3 pomodoro_blocker.py \
 3. タイマーが終了すると `hosts` を元に戻す  
 
 これにより **ブラウザ拡張なしでも確実にブロック**できます。
-
-## exe 化（Windows向け）
-
-Python が入っていない PC でも起動できるようにするには、`PyInstaller` で exe を作成します。
-
-```powershell
-pip install pyinstaller
-pyinstaller --onefile --noconsole pomodoro_blocker.py
-```
-
-- 生成された exe は `dist/pomodoro_blocker.exe` に出力されます。
-- 管理者権限が必要なため、exe も **「管理者として実行」** してください。
-- `pyinstaller` が見つからない場合は、次のように **Python 経由で実行**してください。
-
-```powershell
-python -m PyInstaller --onefile --noconsole pomodoro_blocker.py
-```
-
-### manifest（UAC 設定）とは？
-
-Windows の exe には「**このアプリは管理者権限を要求するか**」を示す設定を埋め込めます。  
-これが **manifest（マニフェスト）** で、UAC（ユーザーアカウント制御）の動作を決めます。
-
-#### できること
-
-- 起動時に **自動で管理者権限を要求（UAC ダイアログを表示）** させる
-
-#### PyInstaller での指定例
-
-```powershell
-pyinstaller --onefile --noconsole --uac-admin pomodoro_blocker.py
-```
-
-このオプションを付けてビルドすると、exe 起動時に **管理者権限を要求するダイアログ** が表示されます。
